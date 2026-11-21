@@ -1,0 +1,666 @@
+name: Build EclipsWelcome
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Create project files
+        run: |
+          mkdir -p src/main/java/ru/eclips/welcome
+          mkdir -p src/main/resources
+
+          cat > pom.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>ru.eclips</groupId>
+              <artifactId>EclipsWelcome</artifactId>
+              <version>1.0.0</version>
+              <packaging>jar</packaging>
+
+              <properties>
+                  <maven.compiler.source>17</maven.compiler.source>
+                  <maven.compiler.target>17</maven.compiler.target>
+                  <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+                  <nukkit.version>1.26.30-R1</nukkit.version>
+              </properties>
+
+              <repositories>
+                  <repository><id>repo-lanink-cn</id><url>https://repo.lanink.cn/repository/maven-public/</url></repository>
+                  <repository><id>opencollab-release</id><url>https://repo.opencollab.dev/maven-releases/</url></repository>
+                  <repository><id>opencollab-snapshot</id><url>https://repo.opencollab.dev/maven-snapshots/</url></repository>
+                  <repository><id>okaeri</id><url>https://repo.okaeri.cloud/releases</url></repository>
+                  <repository><id>porklib</id><url>https://maven.daporkchop.net/</url></repository>
+              </repositories>
+
+              <dependencies>
+                  <dependency>
+                      <groupId>com.nukkit-mot</groupId>
+                      <artifactId>nukkit-mot</artifactId>
+                      <version>${nukkit.version}</version>
+                      <scope>provided</scope>
+                  </dependency>
+              </dependencies>
+
+              <build>
+                  <finalName>EclipsWelcome</finalName>
+              </build>
+          </project>
+          EOF
+
+          cat > src/main/resources/plugin.yml << 'EOF'
+          name: EclipsWelcome
+          main: ru.eclips.welcome.EclipsWelcome
+          version: 1.0.0
+          api: ["1.0.0"]
+          author: Eclips
+          description: Приветственное окно для новых игроков (показывается после входа по паролю)
+          softdepend: [PassAuth]
+
+          commands:
+            welcome:
+              description: Показать приветствие сервера
+              usage: /welcome
+              aliases: [privet]
+
+          permissions:
+            eclipswelcome.admin:
+              description: Сброс приветствия игроку и перезагрузка настроек
+              default: op
+          EOF
+
+          cat > src/main/resources/config.yml << 'EOF'
+          # ============================================================
+          #  EclipsWelcome - приветственное окно для новичков
+          #  Цвета: пишите через знак & (например &a - зелёный, &f - белый).
+          #  &l - жирный, &r - сбросить оформление.
+          #  Для тёмного фона используйте яркие цвета: &f &e &b &a &d &6
+          #  Не используйте тёмные: &0 &1 &8 &7 - их плохо видно.
+          #  После изменений: /welcome reload
+          # ============================================================
+
+          # Через сколько секунд после успешного входа по паролю показать окно
+          delay-seconds: 1
+
+          # Сколько секунд ждать, пока игрок введёт пароль.
+          # Если не вошёл за это время - окно в эту сессию не покажется.
+          max-wait-seconds: 600
+
+          # Запасной вариант: если плагин не смог определить, вошёл ли игрок
+          # (например, PassAuth обновился), окно покажется через столько секунд после захода.
+          fallback-delay-seconds: 20
+
+          # Название плагина авторизации. Если его нет на сервере - окно показывается сразу.
+          auth-plugin-name: PassAuth
+
+          # Заголовок окна
+          title: "&l&6Добро пожаловать!"
+
+          # Текст кнопки (жирный, хорошо читается на серой кнопке)
+          button: "&l&aЗакрыть"
+
+          # Строки окна. Пустая строка "" - отступ.
+          content:
+            - "&l&bДобро пожаловать на наш сервер!"
+            - ""
+            - "&l&e/kit &r&f- взять кит &l&aстарт"
+            - "&l&e/shop &r&f- &l&aмагазин"
+            - "&l&e/skup &r&f- &l&aскупщик"
+            - "&l&e/clan &r&f- &l&aкланы"
+            - "&l&e/warp &r&f- &l&aварпы"
+            - "&l&e/rg &r&f- помощь по &l&aрегионам"
+            - "&l&e/helpmenu &r&f- &l&aподробная помощь &r&fпо серверу"
+            - ""
+            - "&fНаш телеграм: &l&b@Eclipsdev"
+          EOF
+
+          cat > src/main/java/ru/eclips/welcome/EclipsWelcome.java << 'EOF'
+          package ru.eclips.welcome;
+
+          import cn.nukkit.Player;
+          import cn.nukkit.command.Command;
+          import cn.nukkit.command.CommandSender;
+          import cn.nukkit.event.EventHandler;
+          import cn.nukkit.event.Listener;
+          import cn.nukkit.event.player.PlayerFormRespondedEvent;
+          import cn.nukkit.event.player.PlayerJoinEvent;
+          import cn.nukkit.event.player.PlayerQuitEvent;
+          import cn.nukkit.form.element.ElementButton;
+          import cn.nukkit.form.window.FormWindowSimple;
+          import cn.nukkit.plugin.Plugin;
+          import cn.nukkit.plugin.PluginBase;
+
+          import java.io.File;
+          import java.lang.reflect.Field;
+          import java.nio.charset.StandardCharsets;
+          import java.nio.file.Files;
+          import java.nio.file.StandardCopyOption;
+          import java.util.ArrayList;
+          import java.util.Arrays;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Map;
+          import java.util.Set;
+          import java.util.UUID;
+          import java.util.concurrent.ConcurrentHashMap;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
+          import java.util.concurrent.TimeUnit;
+
+          public class EclipsWelcome extends PluginBase implements Listener {
+
+              private static final class Pending {
+                  final long joined;
+                  final int attempts;
+                  long authedAt = 0L;
+
+                  Pending(long joined, int attempts) {
+                      this.joined = joined;
+                      this.attempts = attempts;
+                  }
+              }
+
+              private static final class Open {
+                  final int id;
+                  final long shownAt;
+                  final boolean auto;
+                  final int attempts;
+
+                  Open(int id, long shownAt, boolean auto, int attempts) {
+                      this.id = id;
+                      this.shownAt = shownAt;
+                      this.auto = auto;
+                      this.attempts = attempts;
+                  }
+              }
+
+              // Игроки, которые уже видели окно (хранится в seen.txt)
+              private final Set<String> seen = ConcurrentHashMap.newKeySet();
+              // Игроки, которым окно ещё предстоит показать
+              private final Map<String, Pending> pending = new ConcurrentHashMap<>();
+              // Открытые сейчас окна
+              private final Map<String, Open> openForms = new ConcurrentHashMap<>();
+              private final Object fileLock = new Object();
+
+              private ExecutorService io;
+              private File seenFile;
+
+              private volatile long delayMs = 1000L;
+              private volatile long maxWaitMs = 600000L;
+              private volatile long fallbackMs = 20000L;
+              private volatile String authName = "PassAuth";
+              private volatile String formTitle = "";
+              private volatile String buttonText = "";
+              private volatile String formContent = "";
+
+              @Override
+              public void onEnable() {
+                  try {
+                      saveDefaultConfig();
+                  } catch (Throwable ignored) {
+                  }
+                  loadSettings();
+                  try {
+                      getDataFolder().mkdirs();
+                  } catch (Throwable ignored) {
+                  }
+                  seenFile = new File(getDataFolder(), "seen.txt");
+                  loadSeen();
+
+                  io = Executors.newSingleThreadExecutor(r -> {
+                      Thread t = new Thread(r, "EclipsWelcome-IO");
+                      t.setDaemon(true);
+                      return t;
+                  });
+
+                  getServer().getPluginManager().registerEvents(this, this);
+                  getServer().getScheduler().scheduleRepeatingTask(this, () -> tick(), 10);
+
+                  // Если плагин подключили без перезапуска сервера - подхватываем тех, кто уже онлайн
+                  try {
+                      for (Player p : getServer().getOnlinePlayers().values()) {
+                          String k = key(p);
+                          if (!seen.contains(k)) {
+                              pending.put(k, new Pending(System.currentTimeMillis(), 0));
+                          }
+                      }
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              @Override
+              public void onDisable() {
+                  pending.clear();
+                  openForms.clear();
+                  try {
+                      if (io != null) {
+                          io.shutdown();
+                          io.awaitTermination(3, TimeUnit.SECONDS);
+                      }
+                  } catch (Throwable ignored) {
+                  }
+                  writeSeen(new ArrayList<>(seen));
+              }
+
+              // ---------------------------------------------------------------- настройки
+
+              private void loadSettings() {
+                  try {
+                      delayMs = Math.max(0, getConfig().getInt("delay-seconds", 1)) * 1000L;
+                      maxWaitMs = Math.max(5, getConfig().getInt("max-wait-seconds", 600)) * 1000L;
+                      fallbackMs = Math.max(1, getConfig().getInt("fallback-delay-seconds", 20)) * 1000L;
+                      authName = getConfig().getString("auth-plugin-name", "PassAuth");
+                      formTitle = color(getConfig().getString("title", "&l&6Добро пожаловать!"));
+                      buttonText = color(getConfig().getString("button", "&l&aЗакрыть"));
+
+                      List<String> lines = getConfig().getStringList("content");
+                      if (lines == null || lines.isEmpty()) {
+                          lines = defaultLines();
+                      }
+                      StringBuilder sb = new StringBuilder();
+                      for (int i = 0; i < lines.size(); i++) {
+                          if (i > 0) {
+                              sb.append("\n");
+                          }
+                          sb.append(color(lines.get(i)));
+                      }
+                      formContent = sb.toString();
+                  } catch (Throwable t) {
+                      formTitle = color("&l&6Добро пожаловать!");
+                      buttonText = color("&l&aЗакрыть");
+                      StringBuilder sb = new StringBuilder();
+                      List<String> lines = defaultLines();
+                      for (int i = 0; i < lines.size(); i++) {
+                          if (i > 0) {
+                              sb.append("\n");
+                          }
+                          sb.append(color(lines.get(i)));
+                      }
+                      formContent = sb.toString();
+                  }
+              }
+
+              private static List<String> defaultLines() {
+                  return Arrays.asList(
+                          "&l&bДобро пожаловать на наш сервер!",
+                          "",
+                          "&l&e/kit &r&f- взять кит &l&aстарт",
+                          "&l&e/shop &r&f- &l&aмагазин",
+                          "&l&e/skup &r&f- &l&aскупщик",
+                          "&l&e/clan &r&f- &l&aкланы",
+                          "&l&e/warp &r&f- &l&aварпы",
+                          "&l&e/rg &r&f- помощь по &l&aрегионам",
+                          "&l&e/helpmenu &r&f- &l&aподробная помощь &r&fпо серверу",
+                          "",
+                          "&fНаш телеграм: &l&b@Eclipsdev"
+                  );
+              }
+
+              private static String color(String s) {
+                  if (s == null) {
+                      return "";
+                  }
+                  return s.replaceAll("&([0-9a-fk-orA-FK-OR])", "\u00A7$1");
+              }
+
+              private static String key(Player p) {
+                  return p.getName().toLowerCase(Locale.ROOT);
+              }
+
+              // ---------------------------------------------------------------- хранение
+
+              private void loadSeen() {
+                  try {
+                      if (seenFile.exists()) {
+                          for (String line : Files.readAllLines(seenFile.toPath(), StandardCharsets.UTF_8)) {
+                              String s = line.trim().toLowerCase(Locale.ROOT);
+                              if (!s.isEmpty()) {
+                                  seen.add(s);
+                              }
+                          }
+                      }
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              private void saveSeenAsync() {
+                  final List<String> snapshot = new ArrayList<>(seen);
+                  try {
+                      io.execute(() -> writeSeen(snapshot));
+                  } catch (Throwable t) {
+                      writeSeen(snapshot);
+                  }
+              }
+
+              private void writeSeen(List<String> names) {
+                  synchronized (fileLock) {
+                      try {
+                          File tmp = new File(getDataFolder(), "seen.txt.tmp");
+                          Files.write(tmp.toPath(), names, StandardCharsets.UTF_8);
+                          try {
+                              Files.move(tmp.toPath(), seenFile.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                          } catch (Throwable moveFail) {
+                              Files.move(tmp.toPath(), seenFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                          }
+                      } catch (Throwable ignored) {
+                      }
+                  }
+              }
+
+              private void markSeen(String k) {
+                  if (seen.add(k)) {
+                      saveSeenAsync();
+                  }
+              }
+
+              // ---------------------------------------------------------------- события
+
+              @EventHandler
+              public void onJoin(PlayerJoinEvent e) {
+                  try {
+                      Player p = e.getPlayer();
+                      if (p == null) {
+                          return;
+                      }
+                      String k = key(p);
+                      openForms.remove(k);
+                      if (seen.contains(k)) {
+                          pending.remove(k);
+                          return;
+                      }
+                      pending.put(k, new Pending(System.currentTimeMillis(), 0));
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              @EventHandler
+              public void onQuit(PlayerQuitEvent e) {
+                  try {
+                      Player p = e.getPlayer();
+                      if (p == null) {
+                          return;
+                      }
+                      String k = key(p);
+                      pending.remove(k);
+                      openForms.remove(k);
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              @EventHandler
+              public void onForm(PlayerFormRespondedEvent e) {
+                  try {
+                      Player p = e.getPlayer();
+                      if (p == null) {
+                          return;
+                      }
+                      String k = key(p);
+                      Open o = openForms.get(k);
+                      if (o == null || o.id != e.getFormID()) {
+                          return;
+                      }
+                      openForms.remove(k);
+
+                      long now = System.currentTimeMillis();
+                      // Окно закрылось мгновенно - клиент был занят (чат, инвентарь и т.п.).
+                      // Это не считается прочтением, пробуем показать ещё раз.
+                      if (o.auto && e.wasClosed() && (now - o.shownAt) < 500L && o.attempts < 5 && p.isOnline()) {
+                          pending.put(k, new Pending(now, o.attempts + 1));
+                          return;
+                      }
+                      markSeen(k);
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              // ---------------------------------------------------------------- логика показа
+
+              private void tick() {
+                  try {
+                      long now = System.currentTimeMillis();
+                      for (Map.Entry<String, Pending> en : pending.entrySet()) {
+                          String k = en.getKey();
+                          Pending pd = en.getValue();
+                          try {
+                              Player p = getServer().getPlayerExact(k);
+                              if (p == null || !p.isOnline()) {
+                                  pending.remove(k);
+                                  continue;
+                              }
+                              if (now - pd.joined > maxWaitMs) {
+                                  pending.remove(k);
+                                  continue;
+                              }
+                              Boolean authed = readAuthed(p);
+                              boolean ready;
+                              if (authed == null) {
+                                  ready = (now - pd.joined) >= fallbackMs;
+                              } else if (authed.booleanValue()) {
+                                  if (pd.authedAt == 0L) {
+                                      pd.authedAt = now;
+                                  }
+                                  ready = (now - pd.authedAt) >= delayMs;
+                              } else {
+                                  pd.authedAt = 0L;
+                                  ready = false;
+                              }
+                              if (ready) {
+                                  pending.remove(k);
+                                  show(p, true, pd.attempts);
+                              }
+                          } catch (Throwable ignored) {
+                          }
+                      }
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              private void show(Player p, boolean auto, int attempts) {
+                  try {
+                      FormWindowSimple form = new FormWindowSimple(formTitle, formContent);
+                      form.addButton(new ElementButton(buttonText));
+                      int id = p.showFormWindow(form);
+                      openForms.put(key(p), new Open(id, System.currentTimeMillis(), auto, attempts));
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              // ---------------------------------------------------------------- связь с PassAuth
+
+              /**
+               * true - игрок вошёл, false - ещё не вошёл, null - определить не удалось.
+               * Если плагина авторизации нет на сервере, считаем игрока вошедшим.
+               */
+              private Boolean readAuthed(Player p) {
+                  try {
+                      Plugin pl = getServer().getPluginManager().getPlugin(authName);
+                      if (pl == null || !pl.isEnabled()) {
+                          return Boolean.TRUE;
+                      }
+                      Field f = findField(pl.getClass(), "states");
+                      if (f == null) {
+                          return null;
+                      }
+                      Object m = f.get(pl);
+                      if (!(m instanceof Map)) {
+                          return null;
+                      }
+                      Object st = findState((Map<?, ?>) m, p);
+                      if (st == null) {
+                          return null;
+                      }
+                      Field af = findField(st.getClass(), "authed");
+                      if (af == null) {
+                          return null;
+                      }
+                      Object v = af.get(st);
+                      if (v instanceof Boolean) {
+                          return (Boolean) v;
+                      }
+                      return null;
+                  } catch (Throwable t) {
+                      return null;
+                  }
+              }
+
+              private static Field findField(Class<?> cls, String name) {
+                  for (Class<?> c = cls; c != null && c != Object.class; c = c.getSuperclass()) {
+                      try {
+                          Field f = c.getDeclaredField(name);
+                          f.setAccessible(true);
+                          return f;
+                      } catch (NoSuchFieldException ignored) {
+                      } catch (Throwable t) {
+                          return null;
+                      }
+                  }
+                  return null;
+              }
+
+              private static Object safeGet(Map<?, ?> map, Object key) {
+                  try {
+                      return map.get(key);
+                  } catch (Throwable t) {
+                      return null;
+                  }
+              }
+
+              private static Object findState(Map<?, ?> map, Player p) {
+                  Object s = safeGet(map, p);
+                  if (s != null) {
+                      return s;
+                  }
+                  s = safeGet(map, p.getUniqueId());
+                  if (s != null) {
+                      return s;
+                  }
+                  s = safeGet(map, p.getName());
+                  if (s != null) {
+                      return s;
+                  }
+                  s = safeGet(map, p.getName().toLowerCase(Locale.ROOT));
+                  if (s != null) {
+                      return s;
+                  }
+                  try {
+                      for (Map.Entry<?, ?> en : map.entrySet()) {
+                          Object k = en.getKey();
+                          if (k == null) {
+                              continue;
+                          }
+                          if (k == p) {
+                              return en.getValue();
+                          }
+                          if (k instanceof UUID) {
+                              if (k.equals(p.getUniqueId())) {
+                                  return en.getValue();
+                              }
+                              continue;
+                          }
+                          String ks = (k instanceof Player) ? ((Player) k).getName() : String.valueOf(k);
+                          if (ks.equalsIgnoreCase(p.getName())) {
+                              return en.getValue();
+                          }
+                      }
+                  } catch (Throwable ignored) {
+                  }
+                  return null;
+              }
+
+              // ---------------------------------------------------------------- команды
+
+              private boolean isAdmin(CommandSender sender) {
+                  try {
+                      return sender.isOp() || sender.hasPermission("eclipswelcome.admin");
+                  } catch (Throwable t) {
+                      return false;
+                  }
+              }
+
+              @Override
+              public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+                  try {
+                      if (!command.getName().equalsIgnoreCase("welcome")) {
+                          return false;
+                      }
+
+                      if (args.length == 0) {
+                          if (!(sender instanceof Player)) {
+                              sender.sendMessage("\u00A7eЭта команда только для игроков. Для админов: /welcome reset <ник>");
+                              return true;
+                          }
+                          Player p = (Player) sender;
+                          if (Boolean.FALSE.equals(readAuthed(p))) {
+                              return true;
+                          }
+                          pending.remove(key(p));
+                          show(p, false, 0);
+                          return true;
+                      }
+
+                      String sub = args[0].toLowerCase(Locale.ROOT);
+
+                      if (sub.equals("reset")) {
+                          if (!isAdmin(sender)) {
+                              sender.sendMessage("\u00A7cУ вас нет прав на эту команду.");
+                              return true;
+                          }
+                          if (args.length < 2) {
+                              sender.sendMessage("\u00A7eИспользование: \u00A7f/welcome reset <ник>");
+                              return true;
+                          }
+                          String name = args[1].toLowerCase(Locale.ROOT);
+                          if (seen.remove(name)) {
+                              saveSeenAsync();
+                              sender.sendMessage("\u00A7aГотово: \u00A7f" + args[1] + " \u00A7aснова увидит приветствие при следующем входе.");
+                          } else {
+                              sender.sendMessage("\u00A7eИгрок \u00A7f" + args[1] + " \u00A7eне найден в списке тех, кто видел приветствие.");
+                          }
+                          return true;
+                      }
+
+                      if (sub.equals("reload")) {
+                          if (!isAdmin(sender)) {
+                              sender.sendMessage("\u00A7cУ вас нет прав на эту команду.");
+                              return true;
+                          }
+                          try {
+                              reloadConfig();
+                          } catch (Throwable ignored) {
+                          }
+                          loadSettings();
+                          sender.sendMessage("\u00A7aНастройки приветствия перезагружены.");
+                          return true;
+                      }
+
+                      sender.sendMessage("\u00A7eКоманды: \u00A7f/welcome \u00A77- \u00A7fпоказать приветствие");
+                      if (isAdmin(sender)) {
+                          sender.sendMessage("\u00A7f/welcome reset <ник> \u00A7e- показать приветствие игроку снова");
+                          sender.sendMessage("\u00A7f/welcome reload \u00A7e- перезагрузить настройки");
+                      }
+                      return true;
+                  } catch (Throwable t) {
+                      return true;
+                  }
+              }
+          }
+          EOF
+
+      - name: Build with Maven
+        run: mvn -B package
+
+      - name: Upload plugin jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: EclipsWelcome
+          path: target/EclipsWelcome.jar
